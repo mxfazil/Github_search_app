@@ -119,5 +119,6 @@ The project deliberately keeps state management straightforward and readable rat
 
 ## Known limitations
 
-- GitHub API rate limiting can affect searches and repository fetches in shared environments.
+- GitHub's unauthenticated user-search API is limited to 10 requests per minute per IP. The app caches successful queries and lets you retry after a rate limit resets, but shared network usage can still exhaust the quota.
+- Repository fetching uses GitHub's public API and can also be affected by its unauthenticated rate limit.
 - The app relies on the public GitHub API and therefore does not support private repository data without authentication.

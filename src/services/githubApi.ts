@@ -2,10 +2,64 @@ import type { GitHubRepository, GitHubUser } from '../types/github'
 
 const GITHUB_API_BASE = 'https://api.github.com'
 
+export class GitHubApiError extends Error {
+  readonly status: number
+  readonly retryAt: number | null
+
+  constructor(
+    message: string,
+    status: number,
+    retryAt: number | null = null,
+  ) {
+    super(message)
+    this.name = 'GitHubApiError'
+    this.status = status
+    this.retryAt = retryAt
+  }
+}
+
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const message = await response.text()
-    throw new Error(message || 'GitHub request failed.')
+    const body = await response.text()
+    let message = body || 'GitHub request failed.'
+
+    try {
+      const payload: unknown = JSON.parse(body)
+      if (
+        typeof payload === 'object' &&
+        payload !== null &&
+        'message' in payload &&
+        typeof payload.message === 'string'
+      ) {
+        message = payload.message
+      }
+    } catch {
+      // Keep the response body as the error message when it is not JSON.
+    }
+
+    const isRateLimited =
+      response.status === 429 ||
+      response.headers.get('X-RateLimit-Remaining') === '0' ||
+      (response.status === 403 && /rate limit/i.test(message))
+
+    if (isRateLimited) {
+      const retryAfter = Number(response.headers.get('Retry-After'))
+      const resetAt = Number(response.headers.get('X-RateLimit-Reset')) * 1000
+      const retryAt =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Date.now() + retryAfter * 1000
+          : Number.isFinite(resetAt) && resetAt > Date.now()
+            ? resetAt
+            : null
+
+      throw new GitHubApiError(
+        'GitHub user search is temporarily rate limited.',
+        response.status,
+        retryAt,
+      )
+    }
+
+    throw new GitHubApiError(message, response.status)
   }
 
   return (await response.json()) as T

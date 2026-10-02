@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import type { GitHubUser } from '../types/github'
-import { searchUsers } from '../services/githubApi'
+import { GitHubApiError, searchUsers } from '../services/githubApi'
 
 type MultiSelectProps = {
   selectedUsers: GitHubUser[]
@@ -21,12 +21,16 @@ export function MultiSelect({
   const [searchResults, setSearchResults] = useState<GitHubUser[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
+  const [searchRetryAt, setSearchRetryAt] = useState<number | null>(null)
+  const [searchRetryReady, setSearchRetryReady] = useState(true)
   const [highlightedIndex, setHighlightedIndex] = useState(0)
 
   const containerRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const requestIdRef = useRef(0)
-  const debouncedQuery = useDebounce(inputValue, 300)
+  const searchCacheRef = useRef(new Map<string, GitHubUser[]>())
+  const [searchAttempt, setSearchAttempt] = useState(0)
+  const debouncedQuery = useDebounce(inputValue, 500)
 
   const availableResults = useMemo(
     () =>
@@ -47,14 +51,28 @@ export function MultiSelect({
       setSearchResults([])
       setSearchLoading(false)
       setSearchError(null)
+      setSearchRetryAt(null)
+      setSearchRetryReady(true)
+      return undefined
+    }
+
+    const requestNumber = ++requestIdRef.current
+    const cachedResults = searchCacheRef.current.get(trimmedQuery)
+    if (cachedResults) {
+      setSearchResults(cachedResults)
+      setSearchLoading(false)
+      setSearchError(null)
+      setSearchRetryAt(null)
+      setSearchRetryReady(true)
       return undefined
     }
 
     const controller = new AbortController()
-    const requestNumber = ++requestIdRef.current
 
     setSearchLoading(true)
     setSearchError(null)
+    setSearchRetryAt(null)
+    setSearchRetryReady(true)
 
     void searchUsers(trimmedQuery, controller.signal)
       .then((users) => {
@@ -62,6 +80,7 @@ export function MultiSelect({
           return
         }
 
+        searchCacheRef.current.set(trimmedQuery, users)
         setSearchResults(users)
         setSearchLoading(false)
       })
@@ -74,7 +93,15 @@ export function MultiSelect({
           return
         }
 
-        setSearchError('Unable to load GitHub users right now. Please try again.')
+        if (error instanceof GitHubApiError && error.retryAt !== null) {
+          setSearchError('GitHub user search is rate limited.')
+          setSearchRetryAt(error.retryAt)
+          setSearchRetryReady(error.retryAt <= Date.now())
+        } else if (error instanceof GitHubApiError && error.status === 403) {
+          setSearchError('GitHub denied the search request. Please try again later.')
+        } else {
+          setSearchError('Unable to load GitHub users right now. Please try again.')
+        }
         setSearchResults([])
         setSearchLoading(false)
       })
@@ -82,7 +109,20 @@ export function MultiSelect({
     return () => {
       controller.abort()
     }
-  }, [debouncedQuery, dropdownOpen])
+  }, [debouncedQuery, dropdownOpen, searchAttempt])
+
+  useEffect(() => {
+    if (searchRetryAt === null || searchRetryAt <= Date.now()) {
+      return undefined
+    }
+
+    const timeoutId = window.setTimeout(
+      () => setSearchRetryReady(true),
+      searchRetryAt - Date.now(),
+    )
+
+    return () => window.clearTimeout(timeoutId)
+  }, [searchRetryAt])
 
   useEffect(() => {
     if (!dropdownOpen) {
@@ -234,7 +274,23 @@ export function MultiSelect({
           {searchLoading ? (
             <div className="state-message">Searching GitHub...</div>
           ) : searchError ? (
-            <div className="state-message error">{searchError}</div>
+            <div className="state-message error" role="alert">
+              <p>{searchError}</p>
+              {searchRetryAt !== null ? (
+                <p>
+                  {searchRetryReady
+                    ? 'You can retry now.'
+                    : `Try again after ${new Date(searchRetryAt).toLocaleTimeString()}.`}
+                </p>
+              ) : null}
+              <button
+                type="button"
+                disabled={!searchRetryReady || searchLoading}
+                onClick={() => setSearchAttempt((current) => current + 1)}
+              >
+                Retry search
+              </button>
+            </div>
           ) : availableResults.length === 0 ? (
             <div className="state-message">
               {inputValue.trim() ? 'No GitHub users found.' : 'Search for a GitHub username'}
